@@ -410,13 +410,11 @@ class CameraCalibrationTool:
         self.review_image_label = tk.Label(right_frame, bg="black")
         self.review_image_label.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
-        self.error_graph_label = tk.Label(right_frame, bg="white", text="Click 'Finish Calibration' to compute reprojection errors",
-                                         font=("Arial", 11), height=8, relief=tk.SUNKEN)
+        self.error_graph_label = tk.Label(right_frame, bg="white", height=8, relief=tk.SUNKEN)
         self.error_graph_label.pack(fill=tk.X)
 
-        # If we already have calibration results (returning from results view), show the graph
-        if self.reprojection_errors:
-            self.update_error_graph()
+        # Always show the graph - either with corner counts or reprojection errors
+        self.update_error_graph()
 
         if len(self.captured_frames) > 0:
             self.image_listbox.selection_set(0)
@@ -454,7 +452,41 @@ class CameraCalibrationTool:
         selection = self.image_listbox.curselection()
         if selection:
             idx = selection[0]
-            frame = self.captured_frames[idx]
+            frame = self.captured_frames[idx].copy()
+
+            # Draw detected corners on the image
+            if idx < len(self.image_points):
+                corners = self.image_points[idx]
+
+                # Calculate dot radius
+                if len(corners) > 1:
+                    dist = np.linalg.norm(corners[0] - corners[1])
+                    dot_radius = max(3, int(dist * 0.15))
+                else:
+                    dot_radius = 8
+
+                # Draw corners
+                overlay = frame.copy()
+                for corner in corners:
+                    x, y = corner.ravel()
+                    cv2.circle(overlay, (int(x), int(y)), dot_radius, (0, 255, 0), -1)
+                    cv2.circle(overlay, (int(x), int(y)), 2, (255, 255, 255), -1)
+
+                # Draw chessboard pattern
+                cv2.drawChessboardCorners(frame, self.pattern_size, corners, True)
+
+                # Blend
+                alpha = 0.6
+                frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+
+                # Add info text
+                info_text = f"Image {idx+1}: {len(corners)} corners detected"
+                cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+                # If we have reprojection error for this image, show it
+                if self.reprojection_errors and idx < len(self.reprojection_errors):
+                    error_text = f"Reprojection Error: {self.reprojection_errors[idx]:.4f} px"
+                    cv2.putText(frame, error_text, (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 100, 0), 2)
 
             display_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w = display_frame.shape[:2]
@@ -570,15 +602,17 @@ class CameraCalibrationTool:
             messagebox.showerror("Calibration Error", f"Error during calibration: {str(e)}")
 
     def update_error_graph(self):
-        if not self.reprojection_errors:
-            return
+        """Create bar graph - shows corner counts before calibration, errors after"""
 
-        # Create bar graph with matplotlib-style visualization
+        # Create bar graph
         fig_width = 700
         fig_height = 250
         img = np.ones((fig_height, fig_width, 3), dtype=np.uint8) * 255
 
-        n_images = len(self.reprojection_errors)
+        n_images = len(self.captured_frames)
+        if n_images == 0:
+            return
+
         margin_left = 60
         margin_right = 40
         margin_top = 50
@@ -588,25 +622,46 @@ class CameraCalibrationTool:
         graph_height = fig_height - margin_top - margin_bottom
 
         bar_width = max(8, (graph_width // n_images) - 8)
-        max_error = max(self.reprojection_errors) if self.reprojection_errors else 1.0
-        avg_error = np.mean(self.reprojection_errors)
+
+        # Decide what to show
+        if self.reprojection_errors:
+            # Show reprojection errors
+            data = self.reprojection_errors
+            max_val = max(data)
+            avg_val = np.mean(data)
+            title = "Reprojection Error per Image (pixels)"
+            ylabel = "Error (px)"
+            show_avg_line = True
+        else:
+            # Show number of corners detected
+            data = [len(pts) for pts in self.image_points]
+            max_val = max(data) if data else 1
+            avg_val = np.mean(data) if data else 0
+            title = "Detected Corners per Image"
+            ylabel = "Corners"
+            show_avg_line = False
 
         # Draw axes
         cv2.line(img, (margin_left, margin_top), (margin_left, fig_height - margin_bottom), (0, 0, 0), 2)
         cv2.line(img, (margin_left, fig_height - margin_bottom), (fig_width - margin_right, fig_height - margin_bottom), (0, 0, 0), 2)
 
         # Draw bars
-        for i, error in enumerate(self.reprojection_errors):
-            bar_height = int((error / (max_error * 1.1)) * graph_height)
+        for i, val in enumerate(data):
+            bar_height = int((val / (max_val * 1.1)) * graph_height)
             x_center = margin_left + (i + 0.5) * (graph_width / n_images)
             x1 = int(x_center - bar_width // 2)
             x2 = int(x_center + bar_width // 2)
             y1 = fig_height - margin_bottom - bar_height
             y2 = fig_height - margin_bottom
 
-            # Color bars based on error (green to red gradient)
-            error_ratio = error / max_error
-            color = (int(50 * (1 - error_ratio)), int(150 + 105 * (1 - error_ratio)), int(255 * (1 - error_ratio)))
+            if self.reprojection_errors:
+                # Color bars based on error (green to red gradient)
+                error_ratio = val / max_val
+                color = (int(50 * (1 - error_ratio)), int(150 + 105 * (1 - error_ratio)), int(255 * (1 - error_ratio)))
+            else:
+                # Blue bars for corner counts
+                color = (66, 133, 244)
+
             cv2.rectangle(img, (x1, y1), (x2, y2), color, -1)
             cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 0), 1)
 
@@ -617,26 +672,32 @@ class CameraCalibrationTool:
             cv2.putText(img, text, (text_x, fig_height - margin_bottom + 20), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
 
-        # Draw average line
-        avg_y = fig_height - margin_bottom - int((avg_error / (max_error * 1.1)) * graph_height)
-        cv2.line(img, (margin_left, avg_y), (fig_width - margin_right, avg_y), (244, 67, 54), 2)
-        cv2.putText(img, "Avg", (margin_left - 35, avg_y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (244, 67, 54), 1)
+        # Draw average line (only for reprojection errors)
+        if show_avg_line:
+            avg_y = fig_height - margin_bottom - int((avg_val / (max_val * 1.1)) * graph_height)
+            cv2.line(img, (margin_left, avg_y), (fig_width - margin_right, avg_y), (244, 67, 54), 2)
+            cv2.putText(img, "Avg", (margin_left - 35, avg_y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (244, 67, 54), 1)
 
         # Y-axis labels
         for i in range(5):
-            y_val = (max_error * 1.1) * i / 4
-            y_pos = fig_height - margin_bottom - int((y_val / (max_error * 1.1)) * graph_height)
+            y_val = (max_val * 1.1) * i / 4
+            y_pos = fig_height - margin_bottom - int((y_val / (max_val * 1.1)) * graph_height)
             cv2.line(img, (margin_left - 5, y_pos), (margin_left, y_pos), (0, 0, 0), 1)
-            cv2.putText(img, f"{y_val:.2f}", (5, y_pos + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+            if self.reprojection_errors:
+                cv2.putText(img, f"{y_val:.2f}", (5, y_pos + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+            else:
+                cv2.putText(img, f"{int(y_val)}", (10, y_pos + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
 
         # Title
-        title = "Reprojection Error per Image (pixels)"
         title_size = cv2.getTextSize(title, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
         title_x = (fig_width - title_size[0]) // 2
         cv2.putText(img, title, (title_x, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
-        # Stats in corner
-        stats_text = f"Avg: {avg_error:.4f} | Max: {max(self.reprojection_errors):.4f} | Min: {min(self.reprojection_errors):.4f}"
+        # Stats
+        if self.reprojection_errors:
+            stats_text = f"Avg: {avg_val:.4f} | Max: {max(data):.4f} | Min: {min(data):.4f}"
+        else:
+            stats_text = f"Avg: {avg_val:.1f} | Max: {max(data)} | Min: {min(data)} corners"
         cv2.putText(img, stats_text, (margin_left + 10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
 
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -948,7 +1009,6 @@ if __name__ == "__main__":
     # cap.release()
     # cv2.destroyAllWindows()
 """
-
         filename = filedialog.asksaveasfilename(
             defaultextension=".py",
             filetypes=[("Python files", "*.py"), ("All files", "*.*")],
